@@ -1,0 +1,68 @@
+name: Build and deploy
+
+on:
+  push:
+    branches: [main, master, v1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 规范化镜像名
+        id: image
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: vars.ENABLE_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH 到 Ubuntu 拉镜像并重启
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          APP_IMAGE: ${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_USER: ${{ github.actor }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_PATH || '/opt/knowledge-hub' }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: APP_IMAGE,GHCR_PAT,GHCR_USER,DEPLOY_DIR
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_DIR"
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            APP_IMAGE="$APP_IMAGE" docker compose -f docker-compose.prod.yml pull
+            APP_IMAGE="$APP_IMAGE" docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f

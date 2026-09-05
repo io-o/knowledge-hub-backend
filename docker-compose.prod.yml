@@ -1,0 +1,73 @@
+# 云服务器生产编排：应用走 GHCR 镜像，库只在内网互通
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: knowledge_hub_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/postgres:/var/lib/postgresql/data
+      - ./init-scripts/postgresql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:7-jammy
+    container_name: knowledge_hub_mongodb
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${POSTGRES_DB}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/mongo:/data/db
+      - ./init-scripts/mongodb:/docker-entrypoint-initdb.d
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--eval",
+          "db.adminCommand('ping')",
+          "-u",
+          "${MONGO_USER}",
+          "-p",
+          "${MONGO_PASSWORD}",
+          "--authenticationDatabase",
+          "admin",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  app:
+    image: ${APP_IMAGE}
+    container_name: knowledge_hub_app
+    restart: always
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongodb:27017/${POSTGRES_DB}?authSource=admin
+      SNOWFLAKE_WORKER_ID: ${SNOWFLAKE_WORKER_ID:-1}
+      SNOWFLAKE_OFFSET: ${SNOWFLAKE_OFFSET:-1704067200000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+
+networks:
+  default:
+    name: common-network
